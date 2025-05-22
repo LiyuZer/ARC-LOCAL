@@ -33,99 +33,132 @@ import openai
 from openai import OpenAI
 import threading
 
-
 with open('arc-agi_training_challenges.json') as f:
     train = json.load(f)
-
+with open('arc-agi_training_solutions.json') as f:
+    test = json.load(f)
 # Setup OpenAI API key
-api_key = "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"
+api_key = ""
 
 client = OpenAI(api_key=api_key)
 
+# Converts np.array to clean string for prompt
 def convert_numpy_to_string(arr):
-    """Convert a NumPy array to a clean string representation."""
-    arr_str = np.array2string(arr, separator=", ", threshold=np.inf, max_line_width=np.inf)
-    return f"np.array({arr_str})"
-# Function to generate a function from the input and output
-def generate_prompt(input_grids, output_grids):
-    base_prompt = f"""
-    You are an expert ARC (Abstraction and Reasoning Corpus) problem solver. Your task is to transform the input grid into the correct output grid based on the patterns observed. You will be provided with an input grid in the form of a NumPy array, and you should output a transformed NumPy array that matches the expected output based on the learned transformations.
-    You will be given a series of input and output grids. Formatted as a python function.
-    Note only return this ->
-    START FUNC
-    def transform(input_grid):
-        # Example transformation logic
-        output_grid = input_grid + 6
-        return output_grid
-    END FUNC
-    Please try to creatre a function that generalizes to different inputs.
-    """
-    grid_prompt = []
-    for i in range(len(input_grids)):
-        grid_prompt.append(f"""Input :""")
-        grid_prompt.append(convert_numpy_to_string(input_grids[i]))
-        grid_prompt.append(f"""Output :""")
-        grid_prompt.append(convert_numpy_to_string(output_grids[i]))
-    grid_prompt = "\n".join(grid_prompt)
-    prompt = base_prompt + grid_prompt
-    return prompt
-    
-def generate_functions(i):
-    id_func_dict = {}
-    cn = 0
-    for key in train.keys():
-        input_grids = []
-        output_grids = []
-        for elem in train[key]['train']:
-            input_grid = elem['input']
-            output_grid = elem['output']
-            # Convert to np.array
-            input_grid = np.array(input_grid)
-            output_grid = np.array(output_grid)
-            input_grids.append(input_grid)
-            output_grids.append(output_grid)
-        # Generate the function
-        prompt = generate_prompt(input_grids, output_grids)
+    return np.array2string(arr, separator=', ', threshold=10000)
+
+# === Step 1: Instruction generation prompt ===
+def generate_instruction_prompt(input_grids, output_grids, test_input_grid):
+    base_prompt = """
+You are an expert ARC (Abstraction and Reasoning Corpus) task solver.
+Your job is to write **step-by-step transformation instructions** that turn an input grid into its output grid. Make the instructions as clear and detailed as possible, and abstract enough to apply to generalized grids.
+Label them 1, 2, 3, etc. and use the following format:
+Only return:
+START2
+1. ...
+2. ...
+END2
+
+Below are example input/output grids.
+"""
+    examples = []
+    for inp, out in zip(input_grids, output_grids):
+        examples.append("INPUT GRID")
+        examples.append(convert_numpy_to_string(inp))
+        examples.append("OUTPUT GRID")
+        examples.append(convert_numpy_to_string(out))
+    examples.append("Input test:")
+    examples.append(convert_numpy_to_string(test_input_grid))
+    examples.append("Output test:")
+    return base_prompt + "\n".join(examples)
+
+# === Step 2: Follow instruction with test input ===
+def apply_instruction_prompt(test_input, instruction):
+    base_prompt = """
+You are a Python agent that follows grid transformation instructions.
+Take the input grid and apply the steps precisely to generate the output grid.
+Only return:
+START2
+<resulting grid>
+END2
+"""
+    return base_prompt + f"""
+INPUT GRID
+{convert_numpy_to_string(test_input)}
+
+INSTRUCTION
+{instruction}
+
+Output:
+"""
+
+# === Step 3: GPT call mockup (replace this with your actual GPT client) ===
+def call_gpt(prompt):
+    # Replace this with your real GPT API call
+    # For OpenAI: openai.ChatCompletion.create(...)
+    response = client.responses.create(model="gpt-4.1", input=prompt)
+    return response.output[0].content[0].text
+
+# === Step 4: Per-thread function ===
+def generate_instruction_and_output(i, chunk_size):
+    result_dict = {}
+    keys = list(train.keys())
+    keys = keys[i:i + chunk_size]
+    for key in tqdm(keys, desc=f"Processing {i}"):
         try:
-            # Call OpenAI API
-            response = client.responses.create(
-                model="gpt-4.1",
-                input=prompt,
-            )
-            function_code = response.output[0].content[0].text
-            # Extract the function
-            function_code = function_code.split("START FUNC")[1].split("END FUNC")[0]
-            # Save the function with the corresponding id
-            id_func_dict[key] = function_code
-            print(f"Generated function for ID {key}:")
-            print(function_code)
-            print("Count:", cn)
-            print(
-                "Thread ID:", i,
-            )
+            input_grids = [np.array(x["input"]) for x in train[key]["train"]]
+            output_grids = [np.array(x["output"]) for x in train[key]["train"]]
+            test_input_grid = np.array(train[key]["test"][0]["input"])
+            test_output_grid = np.array(test[key][0]) if key in test else None
+
+            # 1. Generate instruction
+            instruction_prompt = generate_instruction_prompt(input_grids, output_grids, test_input_grid)
+            instruction_raw = call_gpt(instruction_prompt)
+
+            if "START2" not in instruction_raw or "END2" not in instruction_raw:
+                print(f"[{key}] No valid instruction.")
+                continue
+
+            instruction = instruction_raw.split("START2")[1].split("END2")[0].strip()
+
+            # 2. Use instruction on test input
+            apply_prompt = apply_instruction_prompt(test_input_grid, instruction)
+            output_raw = call_gpt(apply_prompt)
+
+            if "START2" not in output_raw or "END2" not in output_raw:
+                print(f"[{key}] No valid output grid.")
+                continue
+
+            predicted_grid = output_raw.split("START2")[1].split("END2")[0].strip()
+            result_dict[key] = {
+                "instruction": instruction,
+                "test_input": test_input_grid.tolist(),
+                "predicted_output": predicted_grid,
+                "expected_output": test_output_grid.tolist() if test_output_grid is not None else None
+            }
+
         except Exception as e:
-            print(f"Error generating function for ID {key}: {e}")
-            # Sleep for a while to avoid hitting the rate limit
-            time.sleep(5)
-        cn += 1
-    # Save the dictionary to a JSON file
-    with open(f'arc_agi_functions_{i}.json', 'w') as f:
-        json.dump(id_func_dict, f)
-    # Sleep for a while to avoid hitting the rate limit
-    time.sleep(5)
+            print(f"[{key}] Error: {e}")
+            time.sleep(2)
 
+    with open(f"arc_agi_instructions_{i}.json", "w") as f:
+        json.dump(result_dict, f)
+    time.sleep(2)
 
-
-# Multithreaded function to generate functions
-def threaded_generate_functions(start, end):
+# === Step 5: Multithreaded execution ===
+def threaded_instruction_generation(start, end):
     threads = []
+    keys = list(train.keys())
+    # Divide into end - start chunks
+    chunk_size =  len(keys) // (end - start)
+    start = 0
     for i in range(start, end):
-        thread = threading.Thread(target=generate_functions, args=(i,))
+        thread = threading.Thread(target=generate_instruction_and_output, args=(start, chunk_size))
         threads.append(thread)
         thread.start()
+        start += chunk_size
     for thread in threads:
         thread.join()
-    print("All threads completed.")
+    print("All threads done.")
 
-# Call the function to generate functions
-threaded_generate_functions(0, 10)
+# === Run ===
+threaded_instruction_generation(0, 10)

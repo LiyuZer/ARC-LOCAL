@@ -1,0 +1,15 @@
+# Ignore virtual environments
+venv/
+.env/
+
+# Ignore Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Ignore temporary files
+*.log
+*.tmp
+
+# Do not ignore .gitignore itself
+!.gitignore
